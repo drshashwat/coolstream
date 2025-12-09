@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  mongo_db:
+    image: mongo:latest
+    container_name: mongo_container
+    ports:
+      - "${DB_PORT}:27017"
+   
+    # environment:
+      # MONGO_INITDB_ROOT_USERNAME: ${MONGO_USERNAME}
+      # MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+      
+    # Create a volume to persist data, so data is not lost when the container is stopped/removed
+    volumes:
+      - mongo_data:/data/db
+
+# Define the volume
+volumes:
+  mongo_data:
