@@ -13,14 +13,14 @@ import (
 func DBInstance() *mongo.Client {
 	err := godotenv.Load(".env")
 	if err != nil {
-		slog.Warn("unable to find .env file", err)
+		slog.Warn("unable to find .env file", "error", err.Error())
 	}
 
 	uri := os.Getenv("MONGODB_URI")
 	if uri == "" {
 		log.Fatal("MONGODB_URI is not set")
 	}
-	slog.Info("MongoDB URI:", uri)
+	slog.Info("MongoDB URI", "uri", uri)
 
 	clientOptions := options.Client().ApplyURI(uri)
 
@@ -44,7 +44,7 @@ func OpenCollection(collectioName string) *mongo.Collection {
 		slog.Error("DATABASE_NAME is not set")
 		return nil
 	}
-	slog.Info("DATABASE_NAME: ", databaseName)
+	slog.Info("DATABASE_NAME", "value", databaseName)
 
 	collection := Client.Database(databaseName).Collection(collectioName)
 	if collection == nil {
