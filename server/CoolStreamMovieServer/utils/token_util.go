@@ -2,14 +2,17 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"os"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"github.com/drshashwat/coolstream/server/CoolStreamMovieServer/database"
+	"github.com/drshashwat/coolstream/server/CoolStreamMovieServer/logger"
 )
 
 type SignedDetails struct {
@@ -26,6 +29,7 @@ var (
 	SECRET_REFRESH_KEY        = os.Getenv("SECRET_REFRESH_KEY")
 
 	userCollection *mongo.Collection = database.OpenCollection("users")
+	log                              = logger.GetLogger()
 )
 
 func GenerateAllTokens(email, firstName, lastName, role, userID string) (string, string, error) {
@@ -41,9 +45,10 @@ func GenerateAllTokens(email, firstName, lastName, role, userID string) (string,
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
 		},
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signedToken, err := token.SignedString([]byte(SECRET_KEY))
 	if err != nil {
+		log.Error().Err(err).Msg("error in signing token")
 		return "", "", err
 	}
 
@@ -56,13 +61,14 @@ func GenerateAllTokens(email, firstName, lastName, role, userID string) (string,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "CoolStream",
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(48 * time.Hour)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * 7 * time.Hour)),
 		},
 	}
 
-	refreshToken := jwt.NewWithClaims(jwt.SigningMethodES256, refreshClaims)
+	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, refreshClaims)
 	signedRefreshToken, err := refreshToken.SignedString([]byte(SECRET_REFRESH_KEY))
 	if err != nil {
+		log.Error().Err(err).Msg("error in refreshing token")
 		return "", "", err
 	}
 
@@ -83,5 +89,39 @@ func UpdateAllTokens(userID, token, refershToken string) (err error) {
 		},
 	}
 	_, err = userCollection.UpdateOne(ctx, bson.M{"user_id": userID}, updateData)
+	if err != nil {
+		log.Error().Err(err).Msg("error in updating token")
+	}
 	return
+}
+
+func GetAccessToken(c *gin.Context) (string, error) {
+	authHeader := c.Request.Header.Get("Authorization")
+	if authHeader == "" {
+		return "", errors.New("authorization Header is required")
+	}
+	tokenString := authHeader[len("Bearer "):]
+	if tokenString == "" {
+		return "", errors.New("bearer tolen is required")
+	}
+	return tokenString, nil
+}
+
+func ValidateToken(tokenString string) (*SignedDetails, error) {
+	claims := &SignedDetails{}
+
+	token, err := jwt.ParseWithClaims(tokenString, claims, func(t *jwt.Token) (any, error) {
+		return []byte(SECRET_KEY), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+		return nil, errors.New("invalid token")
+	}
+	if claims.ExpiresAt.Before(time.Now()) {
+		return nil, errors.New("token has expired")
+	}
+	return claims, nil
 }
