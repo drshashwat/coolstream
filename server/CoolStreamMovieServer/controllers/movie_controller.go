@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,10 +16,12 @@ import (
 	"github.com/tmc/langchaingo/llms/openai"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	"github.com/drshashwat/coolstream/server/CoolStreamMovieServer/database"
 	"github.com/drshashwat/coolstream/server/CoolStreamMovieServer/logger"
 	models "github.com/drshashwat/coolstream/server/CoolStreamMovieServer/models"
+	"github.com/drshashwat/coolstream/server/CoolStreamMovieServer/utils"
 )
 
 var (
@@ -102,8 +105,8 @@ func AddMovie() gin.HandlerFunc {
 
 func AdminReviewUpdate() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		imdb_id := c.Param("imdb_id")
-		if imdb_id == "" {
+		movieID := c.Param("imdb_id")
+		if movieID == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "imdb_id is required"})
 			return
 		}
@@ -124,7 +127,7 @@ func AdminReviewUpdate() gin.HandlerFunc {
 			return
 		}
 
-		filter := bson.D{Key: "imdb_id", Value: movieID}
+		filter := bson.D{{Key: "imdb_id", Value: movieID}}
 		update := bson.M{
 			"$set": bson.M{
 				"admin_review": req.AdminReview,
@@ -150,11 +153,10 @@ func AdminReviewUpdate() gin.HandlerFunc {
 		resp.AdminReview = req.AdminReview
 
 		c.JSON(http.StatusOK, resp)
-		return
 	}
 }
 
-func GetReviewRanking(admin_review string) (string, int, error) {
+func GetReviewRanking(adminReview string) (string, int, error) {
 	rankings, err := GetRankings()
 	if err != nil {
 		return "", 0, err
@@ -184,7 +186,7 @@ func GetReviewRanking(admin_review string) (string, int, error) {
 
 	basePromptTemplate := os.Getenv("BASE_PROMPT_TEMPLATE")
 	basePrompt := strings.Replace(basePromptTemplate, "{rankings}", sentimentDelimited, 1)
-	response, err := llm.Call(context.Background(), basePrompt+admin_review)
+	response, err := llm.Call(context.Background(), basePrompt+adminReview)
 	if err != nil {
 		return "", 0, err
 	}
@@ -205,14 +207,94 @@ func GetRankings() ([]models.Ranking, error) {
 	defer cancel()
 
 	curser, err := rankingCollection.Find(ctx, bson.M{})
-	defer curser.Close(ctx)
-
 	if err != nil {
 		return nil, err
 	}
+	defer curser.Close(ctx)
 	err = curser.All(ctx, &rankings)
 	if err != nil {
 		return nil, err
 	}
 	return rankings, nil
+}
+
+func GetRecomendedMovies() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID, err := utils.GetUserIDFromContext(c)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "userID is not found in context"})
+			return
+		}
+		favouriteGenres, err := GetUsersFavouriteGeners(userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		var recommendedMovieLimitVal int64 = 5
+		recommendedMovieLimitValStr := os.Getenv("RECOMMENDED_MOVIE_LIMIT")
+		if recommendedMovieLimitValStr != "" {
+			val, err := strconv.ParseInt(recommendedMovieLimitValStr, 10, 8)
+			if err != nil {
+				recommendedMovieLimitVal = val
+			}
+		}
+		findOptions := options.Find()
+		findOptions.SetSort(bson.D{{Key: "ranking.ranking_value", Value: 1}})
+		findOptions.SetLimit(recommendedMovieLimitVal)
+		filter := bson.M{"genre.genre_name": bson.M{"$in": favouriteGenres}}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+		defer cancel()
+
+		cursor, err := movieCollection.Find(ctx, filter, findOptions)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching recommended movies"})
+			return
+		}
+		var recommendedMovies []models.Movie
+		if err := cursor.All(ctx, &recommendedMovies); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, recommendedMovies)
+	}
+}
+
+func GetUsersFavouriteGeners(userID string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+	defer cancel()
+	filter := bson.D{{Key: "user_id", Value: userID}}
+	projecton := bson.M{
+		"favourite_genres.genre_name": 1,
+		"_id":                         0,
+	}
+	opts := options.FindOne().SetProjection(projecton)
+
+	var result bson.M
+	err := userCollection.FindOne(ctx, filter, opts).Decode(&result)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			log.Info().Str("userID", userID).Msg("No favourite genres found for user")
+			return []string{}, nil
+		}
+		return nil, err
+	}
+	favGenresArray, ok := result["favourite_genres"].(bson.A)
+	if !ok {
+		return []string{}, errors.New("unable to retrieve favourite genres for user")
+	}
+	var genreName []string
+	for _, item := range favGenresArray {
+		if genreMap, ok := item.(bson.D); ok {
+			for _, elem := range genreMap {
+				if elem.Key == "genre_name" {
+					if name, ok := elem.Value.(string); ok {
+						genreName = append(genreName, name)
+					}
+				}
+			}
+		}
+	}
+	return genreName, nil
 }
